@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bluetooth Connect Demo</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial; color:#111;}
+    body{margin:0;padding:20px;background:#f4f6f8;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+    .card{background:#fff;border-radius:14px;box-shadow:0 6px 20px rgba(0,0,0,0.08);width:min(980px,96vw);padding:20px;box-sizing:border-box;}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+    header h1{font-size:20px;margin:0;}
+    .note{font-size:13px;color:#666;margin-top:6px;}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;}
+    button{padding:12px 16px;border-radius:10px;border:1px solid #ddd;background:linear-gradient(#fff,#fafafa);font-size:16px;cursor:pointer;}
+    button:disabled{opacity:0.5;cursor:default;}
+    #devices{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;}
+    .device{border:1px solid #eee;padding:12px;border-radius:10px;background:#fbfbff;}
+    .device h3{margin:0 0 6px 0;font-size:15px;}
+    .status{font-size:13px;color:#555;margin-bottom:8px;}
+    #log{margin-top:14px;background:#0f1720;color:#e6ffed;padding:10px;border-radius:8px;min-height:120px;overflow:auto;font-family:monospace;font-size:13px;}
+    .warning{background:#fff4e5;border-left:4px solid #ffb020;padding:10px;border-radius:8px;margin-top:12px;color:#663f00;}
+    .success{background:#ecffef;border-left:4px solid #28a745;padding:10px;border-radius:8px;margin-top:12px;color:#0b6830;}
+    .hint{font-size:13px;color:#3a3a3a}
+    .small{font-size:13px;color:#666}
+    footer{margin-top:14px;font-size:13px;color:#777;text-align:right}
+    .row{display:flex;align-items:center;gap:8px}
+  </style>
+</head>
+<body>
+  <div class="card" role="main">
+    <header>
+      <div>
+        <h1>Bluetooth Connect Demo</h1>
+        <div class="note">Web Bluetooth 対応ブラウザで BLE デバイスをスキャンして接続するデモ（Bluefy / BLE Link 推奨）</div>
+      </div>
+      <div class="row">
+        <div id="availBadge" class="small">Bluetooth: 調査中…</div>
+      </div>
+    </header>
+
+    <div id="unsupported" class="warning" style="display:none;">
+      <strong>注意：</strong> Safari（iPad標準ブラウザ）では Web Bluetooth がサポートされていないことが多いです。<br>
+      <span class="hint">動作させるには、App Store の Web BLE 対応ブラウザ（例：Bluefy, BLE Link）でこのページを開いてください。</span>
+    </div>
+
+    <div class="controls" aria-hidden="false">
+      <button id="checkBtn">対応確認</button>
+      <button id="scanBtn" disabled>デバイスをスキャン</button>
+      <button id="reconnectBtn" disabled>再接続（最後の機器）</button>
+      <button id="disconnectAllBtn" disabled>全切断</button>
+    </div>
+
+    <div id="devices" aria-live="polite"></div>
+
+    <div id="log" aria-live="polite">ログ:</div>
+
+    <div class="small" style="margin-top:12px;">
+      <strong>使い方メモ：</strong> 「デバイスをスキャン」を押すとブラウザのデバイス選択ダイアログが開きます。  
+      ペアリングや GATT 読み書きが必要な場合は、接続後に該当ボタンが表示されます。最後に接続したデバイスは LocalStorage に保存され、「再接続」ボタンで復帰できます。
+    </div>
+
+    <footer>Bluetooth Connect Demo — iPad向けプレビュー</footer>
+  </div>
+
+<script>
+// Single-file Web Bluetooth UI logic
+const checkBtn = document.getElementById('checkBtn');
+const scanBtn = document.getElementById('scanBtn');
+const reconnectBtn = document.getElementById('reconnectBtn');
+const disconnectAllBtn = document.getElementById('disconnectAllBtn');
+const devicesDiv = document.getElementById('devices');
+const logEl = document.getElementById('log');
+const unsupported = document.getElementById('unsupported');
+const availBadge = document.getElementById('availBadge');
+
+let knownDevices = {}; // id -> {device, server, cardEl}
+
+// Logging helper
+function log(...args){ const s = args.map(a=> (typeof a==='object'?JSON.stringify(a):String(a))).join(' '); logEl.textContent += '\n' + s; logEl.scrollTop = logEl.scrollHeight; console.debug(...args); }
+
+function supportsWebBluetooth(){ return navigator && 'bluetooth' in navigator; }
+
+async function updateAvailability(){
+  if(!supportsWebBluetooth()){
+    availBadge.textContent = '未サポート';
+    unsupported.style.display = 'block';
+    scanBtn.disabled = true;
+    reconnectBtn.disabled = !localStorage.getItem('bluetooth_last_device_id');
+    return;
+  }
+  try{
+    if(navigator.bluetooth.getAvailability){
+      const av = await navigator.bluetooth.getAvailability();
+      availBadge.textContent = av ? '利用可能' : 'OS/ブラウザで制限';
+      scanBtn.disabled = !av;
+      unsupported.style.display = av ? 'none' : 'block';
+    }else{
+      availBadge.textContent = 'APIあり（可否不明）';
+      scanBtn.disabled = false;
+      unsupported.style.display = 'none';
+    }
+    reconnectBtn.disabled = !localStorage.getItem('bluetooth_last_device_id');
+  }catch(err){
+    availBadge.textContent = '取得エラー';
+    scanBtn.disabled = true;
+    log('availability error', err);
+  }
+}
+
+checkBtn.addEventListener('click', ()=>{ updateAvailability(); log('チェックした。navigator.bluetooth=', !!(navigator.bluetooth)); });
+
+// Create card UI for device
+function createDeviceCard(device){
+  const id = device.id;
+  const card = document.createElement('div');
+  card.className = 'device';
+  card.id = 'dev-'+id;
+  const title = document.createElement('h3');
+  title.textContent = device.name || '(名前なし)';
+  const status = document.createElement('div');
+  status.className = 'status';
+  status.textContent = device.gatt && device.gatt.connected ? '接続中' : '未接続';
+  const btnConnect = document.createElement('button');
+  btnConnect.textContent = device.gatt && device.gatt.connected ? '切断' : '接続';
+  const btnInfo = document.createElement('button');
+  btnInfo.textContent = 'デバイス情報';
+  btnInfo.style.marginLeft = '8px';
+  const statusSmall = document.createElement('div');
+  statusSmall.className = 'small';
+  statusSmall.textContent = 'id:' + id;
+  card.appendChild(title);
+  card.appendChild(status);
+  card.appendChild(btnConnect);
+  card.appendChild(btnInfo);
+  card.appendChild(statusSmall);
+
+  // Connect / Disconnect handler
+  btnConnect.addEventListener('click', async ()=>{
+    if(device.gatt && device.gatt.connected){
+      device.gatt.disconnect();
+      status.textContent = '切断済み';
+      btnConnect.textContent = '接続';
+      log('切断した:', device.name || device.id);
+      saveLastDevice(null);
+      updateButtons();
+      return;
+    }
+    try{
+      log('接続中:', device.name || device.id);
+      const server = await device.gatt.connect();
+      status.textContent = '接続中';
+      btnConnect.textContent = '切断';
+      log('GATT接続成功:', device.name || device.id);
+      // try reading battery level if available
+      try{
+        const svc = await server.getPrimaryService('battery_service');
+        const ch = await svc.getCharacteristic('battery_level');
+        const val = await ch.readValue();
+        const battery = val.getUint8(0);
+        log('Battery:', battery+'%');
+      }catch(e){
+        log('Battery読み取り不可:', e.message || e);
+      }
+      // Save as last device
+      saveLastDevice(device.id);
+      updateButtons();
+    }catch(e){
+      log('接続エラー:', e.message || e);
+    }
+  });
+
+  btnInfo.addEventListener('click', ()=>{
+    log('デバイス情報:', {name: device.name, id: device.id, uuids: device.uuids});
+    alert('Device: ' + (device.name || '(名前なし)') + '\nID: ' + device.id + '\nUUIDs: ' + (device.uuids || []).join(','));
+  });
+
+  devicesDiv.prepend(card);
+  return card;
+}
+
+function saveLastDevice(id){
+  if(id) localStorage.setItem('bluetooth_last_device_id', id);
+  else localStorage.removeItem('bluetooth_last_device_id');
+  reconnectBtn.disabled = !localStorage.getItem('bluetooth_last_device_id');
+}
+
+function updateButtons(){
+  // disable disconnectAll if no connected devices
+  const anyConnected = Object.values(knownDevices).some(o=> o.device && o.device.gatt && o.device.gatt.connected);
+  disconnectAllBtn.disabled = !anyConnected;
+}
+
+// Scan handler
+scanBtn.addEventListener('click', async ()=>{
+  log('スキャン開始 — ブラウザの選択ダイアログが開きます');
+  try{
+    const options = { acceptAllDevices: true, optionalServices: ['battery_service','device_information'] };
+    const device = await navigator.bluetooth.requestDevice(options);
+    log('選択:', device.name || device.id);
+    // create card and store
+    if(!knownDevices[device.id]){
+      const cardEl = createDeviceCard(device);
+      knownDevices[device.id] = {device, server:null, cardEl};
+      device.addEventListener('gattserverdisconnected', (ev)=>{
+        log('イベント: 切断', ev.target && (ev.target.name || ev.target.id));
+        const st = document.getElementById('dev-'+ev.target.id);
+        if(st) st.querySelector('.status').textContent = '切断済み';
+        updateButtons();
+      });
+    } else {
+      log('すでに登録済みのデバイスです');
+    }
+    updateButtons();
+  }catch(err){
+    log('スキャン/選択がキャンセルされたかエラー:', err && err.message ? err.message : err);
+  }
+});
+
+// Reconnect to last device id (if browser supports navigator.bluetooth.getDevices)
+reconnectBtn.addEventListener('click', async ()=>{
+  const lastId = localStorage.getItem('bluetooth_last_device_id');
+  if(!lastId){ log('保存された機器がありません'); return; }
+  log('保存機器への再接続を試みます: ' + lastId);
+  try{
+    if(navigator.bluetooth && navigator.bluetooth.getDevices){
+      const devices = await navigator.bluetooth.getDevices();
+      const found = devices.find(d=> d.id === lastId);
+      if(found){
+        log('見つかったデバイス:', found.name || found.id);
+        if(!knownDevices[found.id]){
+          createDeviceCard(found);
+          knownDevices[found.id] = {device: found};
+        }
+      } else {
+        log('デバイス一覧に見つかりません（以前の許可が必要）');
+      }
+    } else {
+      log('再接続には browser.getDevices() が必要ですが、このブラウザは未対応です');
+    }
+  }catch(e){
+    log('再接続エラー:', e);
+  }
+});
+
+disconnectAllBtn.addEventListener('click', ()=>{
+  Object.values(knownDevices).forEach(o=>{
+    try{ if(o.device && o.device.gatt && o.device.gatt.connected) o.device.gatt.disconnect(); }catch(e){}
+  });
+  log('全て切断しました');
+  updateButtons();
+  saveLastDevice(null);
+});
+
+// Auto-init
+updateAvailability();
+log('Bluetooth Connect Demo 初期化');
+
+</script>
+</body>
+</html>
